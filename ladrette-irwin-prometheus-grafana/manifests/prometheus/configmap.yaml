@@ -1,0 +1,223 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    alerting:
+      alertmanagers:
+        - kubernetes_sd_configs:
+            - role: endpoints
+              namespaces:
+                names: [monitoring]
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_service_name]
+              action: keep
+              regex: alertmanager
+            - source_labels: [__meta_kubernetes_endpoint_port_name]
+              action: keep
+              regex: web
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      # Prometheus lui-même
+      - job_name: prometheus
+        static_configs:
+          - targets: [localhost:9090]
+
+      # Découverte automatique des pods annotés (app dans namespace default)
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          # Exclure le namespace monitoring (scraping via endpoints séparé)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: drop
+            regex: monitoring
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: (.+?)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: replace
+            target_label: job
+
+      # Alertmanager
+      - job_name: alertmanager
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [monitoring]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: alertmanager
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: web
+
+      # node-exporter
+      - job_name: node-exporter
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [monitoring]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: node-exporter
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: metrics
+
+      # kube-state-metrics
+      - job_name: kube-state-metrics
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [monitoring]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: kube-state-metrics
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+
+      # Grafana
+      - job_name: grafana
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [monitoring]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: grafana
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+
+  rules.yml: |
+    groups:
+      - name: component_availability
+        interval: 30s
+        rules:
+          - alert: PrometheusDown
+            expr: up{job="prometheus"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              component: prometheus
+            annotations:
+              summary: "Prometheus est indisponible"
+              description: "Le scraping de Prometheus a échoué sur {{ $labels.instance }}"
+
+          - alert: AlertmanagerDown
+            expr: up{job="alertmanager"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              component: alertmanager
+            annotations:
+              summary: "Alertmanager est indisponible (collecte Prometheus)"
+              description: "Le scraping d'Alertmanager a échoué sur {{ $labels.instance }}"
+
+          - alert: GrafanaDown
+            expr: up{job="grafana"} == 0
+            for: 1m
+            labels:
+              severity: warning
+              component: grafana
+            annotations:
+              summary: "Grafana est indisponible"
+              description: "Le scraping de Grafana a échoué sur {{ $labels.instance }}"
+
+          - alert: NodeExporterDown
+            expr: up{job="node-exporter"} == 0
+            for: 1m
+            labels:
+              severity: warning
+              component: node-exporter
+            annotations:
+              summary: "node-exporter est indisponible"
+              description: "Le scraping de node-exporter a échoué sur {{ $labels.instance }}"
+
+          - alert: KubeStateMetricsDown
+            expr: up{job="kube-state-metrics"} == 0
+            for: 1m
+            labels:
+              severity: warning
+              component: kube-state-metrics
+            annotations:
+              summary: "kube-state-metrics est indisponible"
+              description: "Le scraping de kube-state-metrics a échoué sur {{ $labels.instance }}"
+
+          - alert: AppDown
+            expr: up{job="app"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              component: app
+            annotations:
+              summary: "L'application HTTP est indisponible"
+              description: "Le scraping de l'application a échoué sur {{ $labels.instance }}"
+
+      - name: http_errors
+        rules:
+          - alert: HighHTTP5xxRate
+            expr: sum(increase(http_requests_total{status=~"5.."}[5m])) > 5
+            for: 1m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Trop d'erreurs HTTP 5xx"
+              description: "{{ $value | printf \"%.0f\" }} erreurs 5xx détectées en 5 minutes (seuil : 5)"
+
+      - name: kubernetes_availability
+        rules:
+          - alert: AlertmanagerUnavailableInK8s
+            expr: kube_deployment_status_replicas_available{namespace="monitoring", deployment="alertmanager"} == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Alertmanager indisponible dans Kubernetes"
+              description: "Le déploiement Alertmanager n'a aucun replica disponible dans le namespace monitoring"
+
+      - name: app_behavior
+        rules:
+          - alert: HighAppErrorRatio
+            expr: |
+              sum(rate(http_requests_total{status=~"[45].."}[5m]))
+              /
+              sum(rate(http_requests_total[5m])) > 0.3
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Taux d'erreur élevé dans l'application"
+              description: "Le ratio erreurs (4xx+5xx) / total dépasse 30% depuis 2 minutes. Valeur : {{ $value | humanizePercentage }}"

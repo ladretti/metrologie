@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: air-quality-importer
+  namespace: logging
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: air-quality-importer
+          image: ladrette-irwin/air-quality-importer:1.0.0
+          imagePullPolicy: Never
+          env:
+            - name: XPACK_MONITORING_ENABLED
+              value: "false"
+            - name: LS_JAVA_OPTS
+              value: "-Xms256m -Xmx256m"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi

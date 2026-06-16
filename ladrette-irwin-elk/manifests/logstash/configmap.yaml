@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: logging
+data:
+  logstash.yml: |
+    http.host: "0.0.0.0"
+    xpack.monitoring.enabled: false
+    pipeline.workers: 1
+
+  app-logs.conf: |
+    input {
+      beats {
+        port => 5044
+      }
+    }
+
+    filter {
+      # Filtrer uniquement les logs de l'application
+      if [kubernetes][labels][app] != "app" {
+        drop {}
+      }
+
+      # Parser le message JSON produit par le serveur Go (slog)
+      json {
+        source => "message"
+        target => "parsed"
+        skip_on_invalid_json => true
+      }
+
+      if [parsed] {
+        if [parsed][level] {
+          mutate { add_field => { "level" => "%{[parsed][level]}" } }
+        }
+        if [parsed][msg] {
+          mutate { add_field => { "log_message" => "%{[parsed][msg]}" } }
+        }
+        if [parsed][request_id] {
+          mutate { add_field => { "request_id" => "%{[parsed][request_id]}" } }
+        }
+        if [parsed][method] {
+          mutate { add_field => { "method" => "%{[parsed][method]}" } }
+        }
+        if [parsed][path] {
+          mutate { add_field => { "path" => "%{[parsed][path]}" } }
+        }
+
+        # Utiliser le timestamp applicatif
+        date {
+          match => ["[parsed][time]", "ISO8601"]
+          target => "@timestamp"
+        }
+
+        if [parsed][status] {
+          mutate { add_field => { "status" => "%{[parsed][status]}" } }
+          mutate { convert => { "status" => "integer" } }
+        }
+        if [parsed][duration_ms] {
+          mutate { add_field => { "duration_ms" => "%{[parsed][duration_ms]}" } }
+          mutate { convert => { "duration_ms" => "integer" } }
+        }
+        if [parsed][item_count] {
+          mutate { add_field => { "item_count" => "%{[parsed][item_count]}" } }
+          mutate { convert => { "item_count" => "integer" } }
+        }
+        if [parsed][event_type] {
+          mutate { add_field => { "event_type" => "%{[parsed][event_type]}" } }
+        }
+
+        mutate {
+          remove_field => ["parsed", "message"]
+        }
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch:9200"]
+        index => "app-logs-%{+YYYY.MM.dd}"
+      }
+    }
